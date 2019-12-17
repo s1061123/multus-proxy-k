@@ -1,0 +1,12 @@
+# Binary output dir
+bin/
+multus-proxy
+daemon
+
+# GOPATH created by the build script
+gopath/
+
+# Test outputs
+*.out
+*.test
+data
