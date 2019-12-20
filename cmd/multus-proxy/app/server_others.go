@@ -33,7 +33,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/proxy"
+	"github.com/s1061123/multus-proxy-k/pkg/proxy"
 	proxyconfigapi "github.com/s1061123/multus-proxy-k/pkg/proxy/apis/config"
 	proxyconfigscheme "github.com/s1061123/multus-proxy-k/pkg/proxy/apis/config/scheme"
 	"github.com/s1061123/multus-proxy-k/pkg/proxy/healthcheck"

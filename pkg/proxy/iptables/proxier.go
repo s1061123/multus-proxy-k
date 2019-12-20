@@ -26,7 +26,7 @@ import (
 	"encoding/base32"
 	"fmt"
 	"net"
-	"os"
+	//"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +51,9 @@ import (
 	utilsysctl "k8s.io/kubernetes/pkg/util/sysctl"
 	utilexec "k8s.io/utils/exec"
 	utilnet "k8s.io/utils/net"
+
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -177,10 +180,12 @@ type Proxier struct {
 	// current is state after applying all of those.
 	endpointsChanges *proxy.EndpointChangeTracker
 	serviceChanges   *proxy.ServiceChangeTracker
+	podChanges       *proxy.PodChangeTracker
 
 	mu           sync.Mutex // protects the following fields
 	serviceMap   proxy.ServiceMap
 	endpointsMap proxy.EndpointsMap
+	podMap       proxy.PodMap
 	portsMap     map[utilproxy.LocalPort]utilproxy.Closeable
 	// endpointsSynced, endpointSlicesSynced, and servicesSynced are set to true
 	// when corresponding objects are synced after startup. This is used to avoid
@@ -188,6 +193,7 @@ type Proxier struct {
 	endpointsSynced      bool
 	endpointSlicesSynced bool
 	servicesSynced       bool
+	podSynced            bool
 	initialized          int32
 	syncRunner           *async.BoundedFrequencyRunner // governs calls to syncProxyRules
 
@@ -296,6 +302,8 @@ func NewProxier(ipt utiliptables.Interface,
 		serviceChanges:           proxy.NewServiceChangeTracker(newServiceInfo, &isIPv6, recorder),
 		endpointsMap:             make(proxy.EndpointsMap),
 		endpointsChanges:         proxy.NewEndpointChangeTracker(hostname, newEndpointInfo, &isIPv6, recorder, endpointSlicesEnabled),
+		podMap:                   make(proxy.PodMap),
+		podChanges:               proxy.NewPodChangeTracker(recorder),
 		iptables:                 ipt,
 		masqueradeAll:            masqueradeAll,
 		masqueradeMark:           masqueradeMark,
@@ -580,6 +588,31 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.syncProxyRules()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+	//klog.Infof("XXX: OnPodAdd(%s)", pod.Name)
+	proxier.OnPodUpdate(nil, pod)
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+	//proxier.OnPodUpdate(endpoints)
+	if proxier.podChanges.Update(oldPod, pod) && proxier.isInitialized() {
+		proxier.Sync()
+	}
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+	proxier.OnPodUpdate(pod, nil)
+}
+
+func (proxier *Proxier) OnPodSynced() {
+	proxier.mu.Lock()
+	proxier.podSynced = true
+	proxier.mu.Unlock()
+
+	// Sync unconditionally - this is called once per lifetime.
+	proxier.syncProxyRules()
+}
+
 // portProtoHash takes the ServicePortName and protocol for a service
 // returns the associated 16 character hash. This is computed by hashing (sha256)
 // then encoding to base32 and truncating to 16 chars. We do this because IPTables
@@ -671,6 +704,31 @@ func (proxier *Proxier) appendServiceCommentLocked(args []string, svcName string
 // The only other iptables rules are those that are setup in iptablesInit()
 // This assumes proxier.mu is NOT held
 func (proxier *Proxier) syncProxyRules() {
+
+	proxier.podMap.Update(proxier.podChanges)
+	//klog.Infof("XXXPM: %v", proxier.podMap.String())
+	for _, v := range proxier.podMap {
+		//klog.Infof("XXX: %s, Net-attach-def: %d", v.Name(), len(v.NetworkAttachments()))
+		if len(v.NetworkAttachments()) > 0 {
+			klog.Infof("XXX: targetPod: %v", v)
+
+			//XXX: for each pods in node....
+			netns, err := ns.GetNS(v.NetworkNamespace())
+			if err != nil {
+				klog.Info("XXX: cannot get netNS")
+				continue
+			}
+
+			_ = netns.Do(func(_ ns.NetNS) error {
+				proxier.syncProxyRules_pods(&v)
+				return nil
+			})
+		}
+	}
+
+}
+
+func (proxier *Proxier) syncProxyRules_pods(podInfo *proxy.PodInfo) {
 	proxier.mu.Lock()
 	defer proxier.mu.Unlock()
 
@@ -872,7 +930,7 @@ func (proxier *Proxier) syncProxyRules() {
 				"-m", protocol, "-p", protocol,
 				"-d", utilproxy.ToCIDR(svcInfo.ClusterIP()),
 				"--dport", strconv.Itoa(svcInfo.Port()),
-			)
+				)
 			if proxier.masqueradeAll {
 				writeLine(proxier.natRules, append(args, "-j", string(KubeMarkMasqChain))...)
 			} else if len(proxier.clusterCIDR) > 0 {
@@ -881,7 +939,17 @@ func (proxier *Proxier) syncProxyRules() {
 				// routing to any node, and that node will bridge into the Service
 				// for you.  Since that might bounce off-node, we masquerade here.
 				// If/when we support "Local" policy for VIPs, we should update this.
-				writeLine(proxier.natRules, append(args, "! -s", proxier.clusterCIDR, "-j", string(KubeMarkMasqChain))...)
+				for _, ifName := range podInfo.GetMultusNetIFs() {
+					netCIDRs, err := getIFNetCIDR(ifName)
+					if err != nil || netCIDRs == nil {
+						klog.Infof("XXX: %v", err)
+						continue
+					}
+
+					for _, cidr := range netCIDRs {
+						writeLine(proxier.natRules, append(args, "! -s", cidr.String(), "-j", string(KubeMarkMasqChain))...)
+					}
+				}
 			}
 			writeLine(proxier.natRules, append(args, "-j", string(svcChain))...)
 		} else {
@@ -1378,28 +1446,39 @@ func (proxier *Proxier) syncProxyRules() {
 	)
 
 	// The following rules can only be set if clusterCIDR has been defined.
-	if len(proxier.clusterCIDR) != 0 {
-		// The following two rules ensure the traffic after the initial packet
-		// accepted by the "kubernetes forwarding rules" rule above will be
-		// accepted, to be as specific as possible the traffic must be sourced
-		// or destined to the clusterCIDR (to/from a pod).
-		writeLine(proxier.filterRules,
-			"-A", string(kubeForwardChain),
-			"-s", proxier.clusterCIDR,
-			"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod source rule"`,
-			"-m", "conntrack",
-			"--ctstate", "RELATED,ESTABLISHED",
-			"-j", "ACCEPT",
-		)
-		writeLine(proxier.filterRules,
-			"-A", string(kubeForwardChain),
-			"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod destination rule"`,
-			"-d", proxier.clusterCIDR,
-			"-m", "conntrack",
-			"--ctstate", "RELATED,ESTABLISHED",
-			"-j", "ACCEPT",
-		)
+
+	for _, ifName := range podInfo.GetMultusNetIFs() {
+		netCIDRs, err := getIFNetCIDR(ifName)
+
+		if err != nil || netCIDRs == nil {
+			klog.Infof("XXX: %v", err)
+			continue
+		}
+
+		for _, cidr := range netCIDRs {
+			// The following two rules ensure the traffic after the initial packet
+			// accepted by the "kubernetes forwarding rules" rule above will be
+			// accepted, to be as specific as possible the traffic must be sourced
+			// or destined to the clusterCIDR (to/from a pod).
+			writeLine(proxier.filterRules,
+				"-A", string(kubeForwardChain),
+				"-s", cidr.String(),
+				"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod source rule"`,
+				"-m", "conntrack",
+				"--ctstate", "RELATED,ESTABLISHED",
+				"-j", "ACCEPT",
+			)
+			writeLine(proxier.filterRules,
+				"-A", string(kubeForwardChain),
+				"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod destination rule"`,
+				"-d", cidr.String(),
+				"-m", "conntrack",
+				"--ctstate", "RELATED,ESTABLISHED",
+				"-j", "ACCEPT",
+			)
+		}
 	}
+
 
 	// Write the end-of-table markers.
 	writeLine(proxier.filterRules, "COMMIT")
@@ -1413,10 +1492,12 @@ func (proxier *Proxier) syncProxyRules() {
 	proxier.iptablesData.Write(proxier.natChains.Bytes())
 	proxier.iptablesData.Write(proxier.natRules.Bytes())
 
+	/*
 	fmt.Printf("XXX: ")
 	proxier.iptablesData.WriteTo(os.Stdout)
 	fmt.Printf("\n")
-	/* //XXX
+	*/
+
 	klog.V(5).Infof("Restoring iptables rules: %s", proxier.iptablesData.Bytes())
 	err = proxier.iptables.RestoreAll(proxier.iptablesData.Bytes(), utiliptables.NoFlushTables, utiliptables.RestoreCounters)
 	if err != nil {
@@ -1427,7 +1508,7 @@ func (proxier *Proxier) syncProxyRules() {
 		utilproxy.RevertPorts(replacementPortsMap, proxier.portsMap)
 		return
 	}
-	*/
+
 	for name, lastChangeTriggerTimes := range endpointUpdateResult.LastChangeTriggerTimes {
 		for _, lastChangeTriggerTime := range lastChangeTriggerTimes {
 			latency := metrics.SinceInSeconds(lastChangeTriggerTime)
@@ -1524,4 +1605,22 @@ func openLocalPort(lp *utilproxy.LocalPort) (utilproxy.Closeable, error) {
 	}
 	klog.V(2).Infof("Opened local port %s", lp.String())
 	return socket, nil
+}
+
+func getIFNetCIDR(ifNames string) ([]*net.IPNet, error) {
+	ifLink, err := netlink.LinkByName(ifNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed at LinkByName")
+	}
+	//XXX: need to support v6 as well!
+	addrs, err := netlink.AddrList(ifLink, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("failed at AddrList")
+	}
+
+	cidrs := []*net.IPNet{}
+	for _, v := range addrs {
+		cidrs = append(cidrs, v.IPNet)
+	}
+	return cidrs, nil
 }

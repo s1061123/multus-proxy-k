@@ -174,6 +174,18 @@ func (proxier *metaProxier) OnEndpointSlicesSynced() {
 	//noop
 }
 
+func (proxier *metaProxier) OnPodAdd(pod *v1.Pod) {
+}
+
+func (proxier *metaProxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+}
+
+func (proxier *metaProxier) OnPodDelete(pod *v1.Pod) {
+}
+
+func (proxier *metaProxier) OnPodSynced() {
+}
+
 // endpointsIPFamily that returns IPFamily of endpoints or error if
 // failed to identify the IP family.
 func endpointsIPFamily(endpoints *v1.Endpoints) (*v1.IPFamily, error) {
