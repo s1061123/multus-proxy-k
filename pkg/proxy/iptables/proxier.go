@@ -58,25 +58,25 @@ import (
 
 const (
 	// the services chain
-	kubeServicesChain utiliptables.Chain = "KUBE-SERVICES"
+	kubeServicesChain utiliptables.Chain = "MULTUS-SERVICES"
 
 	// the external services chain
-	kubeExternalServicesChain utiliptables.Chain = "KUBE-EXTERNAL-SERVICES"
+	kubeExternalServicesChain utiliptables.Chain = "MULTUS-EXTERNAL-SERVICES"
 
 	// the nodeports chain
-	kubeNodePortsChain utiliptables.Chain = "KUBE-NODEPORTS"
+	kubeNodePortsChain utiliptables.Chain = "MULTUS-NODEPORTS"
 
 	// the kubernetes postrouting chain
-	kubePostroutingChain utiliptables.Chain = "KUBE-POSTROUTING"
+	kubePostroutingChain utiliptables.Chain = "MULTUS-POSTROUTING"
 
 	// KubeMarkMasqChain is the mark-for-masquerade chain
-	KubeMarkMasqChain utiliptables.Chain = "KUBE-MARK-MASQ"
+	KubeMarkMasqChain utiliptables.Chain = "MULTUS-MARK-MASQ"
 
 	// KubeMarkDropChain is the mark-for-drop chain
-	KubeMarkDropChain utiliptables.Chain = "KUBE-MARK-DROP"
+	KubeMarkDropChain utiliptables.Chain = "MULTUS-MARK-DROP"
 
 	// the kubernetes forward chain
-	kubeForwardChain utiliptables.Chain = "KUBE-FORWARD"
+	kubeForwardChain utiliptables.Chain = "MULTUS-FORWARD"
 )
 
 // KernelCompatTester tests whether the required kernel capabilities are
@@ -390,7 +390,7 @@ func CleanupLeftovers(ipt utiliptables.Interface) (encounteredError bool) {
 		// Hunt for service and endpoint chains.
 		for chain := range existingNATChains {
 			chainString := string(chain)
-			if strings.HasPrefix(chainString, "KUBE-SVC-") || strings.HasPrefix(chainString, "KUBE-SEP-") || strings.HasPrefix(chainString, "KUBE-FW-") || strings.HasPrefix(chainString, "KUBE-XLB-") {
+			if strings.HasPrefix(chainString, "MULTUS-SVC-") || strings.HasPrefix(chainString, "MULTUS-SEP-") || strings.HasPrefix(chainString, "MULTUS-FW-") || strings.HasPrefix(chainString, "MULTUS-XLB-") {
 				writeBytesLine(natChains, existingNATChains[chain]) // flush
 				writeLine(natRules, "-X", chainString)              // delete
 			}
@@ -517,6 +517,7 @@ func (proxier *Proxier) OnServiceSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnServSync()")
 	proxier.syncProxyRules()
 }
 
@@ -549,6 +550,7 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnEndpointsSync()")
 	proxier.syncProxyRules()
 }
 
@@ -585,6 +587,7 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnEndpointsSliceSync()")
 	proxier.syncProxyRules()
 }
 
@@ -594,10 +597,12 @@ func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
 }
 
 func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
-	//proxier.OnPodUpdate(endpoints)
+	// XXX: is the sequence correct?
 	if proxier.podChanges.Update(oldPod, pod) && proxier.isInitialized() {
 		proxier.Sync()
 	}
+	klog.Info("XXX: OnPodUpdate()")
+	proxier.syncProxyRules()
 }
 
 func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
@@ -610,6 +615,7 @@ func (proxier *Proxier) OnPodSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnPodSync()")
 	proxier.syncProxyRules()
 }
 
@@ -627,14 +633,14 @@ func portProtoHash(servicePortName string, protocol string) string {
 // returns the associated iptables chain.  This is computed by hashing (sha256)
 // then encoding to base32 and truncating with the prefix "KUBE-SVC-".
 func servicePortChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-SVC-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-SVC-" + portProtoHash(servicePortName, protocol))
 }
 
 // serviceFirewallChainName takes the ServicePortName for a service and
 // returns the associated iptables chain.  This is computed by hashing (sha256)
 // then encoding to base32 and truncating with the prefix "KUBE-FW-".
 func serviceFirewallChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-FW-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-FW-" + portProtoHash(servicePortName, protocol))
 }
 
 // serviceLBPortChainName takes the ServicePortName for a service and
@@ -643,14 +649,14 @@ func serviceFirewallChainName(servicePortName string, protocol string) utiliptab
 // this because IPTables Chain Names must be <= 28 chars long, and the longer
 // they are the harder they are to read.
 func serviceLBChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-XLB-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-XLB-" + portProtoHash(servicePortName, protocol))
 }
 
 // This is the same as servicePortChainName but with the endpoint included.
 func servicePortEndpointChainName(servicePortName string, protocol string, endpoint string) utiliptables.Chain {
 	hash := sha256.Sum256([]byte(servicePortName + protocol + endpoint))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
-	return utiliptables.Chain("KUBE-SEP-" + encoded[:16])
+	return utiliptables.Chain("MULTUS-SEP-" + encoded[:16])
 }
 
 // After a UDP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
@@ -705,26 +711,32 @@ func (proxier *Proxier) appendServiceCommentLocked(args []string, svcName string
 // This assumes proxier.mu is NOT held
 func (proxier *Proxier) syncProxyRules() {
 
+	//klog.Infof("XXX: syncProxyRules():changes %v", proxier.podChanges.String())
+	//klog.Infof("XXX: syncProxyRules():map before %v", proxier.podMap.String())
 	proxier.podMap.Update(proxier.podChanges)
-	//klog.Infof("XXXPM: %v", proxier.podMap.String())
+	//klog.Infof("XXX: syncProxyRules():map after %v", proxier.podMap.String())
+	//klog.Infof("XXXPodMap:%s", proxier.podMap.String())
+	//klog.Infof("XXX----")
 	for _, v := range proxier.podMap {
-		//klog.Infof("XXX: %s, Net-attach-def: %d", v.Name(), len(v.NetworkAttachments()))
+		//klog.Infof("XXX: %s: %v\n", v, v.NetworkAttachments())
 		if len(v.NetworkAttachments()) > 0 {
-			klog.Infof("XXX: targetPod: %v", v)
+			//klog.Infof("XXX: targetPod: %v", v.Name())
 
 			//XXX: for each pods in node....
 			netns, err := ns.GetNS(v.NetworkNamespace())
 			if err != nil {
-				klog.Info("XXX: cannot get netNS")
+				//klog.Info("XXX: cannot get netNS")
 				continue
 			}
 
+			//klog.Infof("XXX: targetPod-iptables set: %v", v.Name())
 			_ = netns.Do(func(_ ns.NetNS) error {
 				proxier.syncProxyRules_pods(&v)
 				return nil
 			})
 		}
 	}
+	//klog.Infof("----XXX")
 
 }
 
@@ -942,7 +954,7 @@ func (proxier *Proxier) syncProxyRules_pods(podInfo *proxy.PodInfo) {
 				for _, ifName := range podInfo.GetMultusNetIFs() {
 					netCIDRs, err := getIFNetCIDR(ifName)
 					if err != nil || netCIDRs == nil {
-						klog.Infof("XXX: %v", err)
+						klog.Infof("XXX: invalid CIDR %v", err)
 						continue
 					}
 
@@ -1379,7 +1391,7 @@ func (proxier *Proxier) syncProxyRules_pods(podInfo *proxy.PodInfo) {
 	for chain := range existingNATChains {
 		if !activeNATChains[chain] {
 			chainString := string(chain)
-			if !strings.HasPrefix(chainString, "KUBE-SVC-") && !strings.HasPrefix(chainString, "KUBE-SEP-") && !strings.HasPrefix(chainString, "KUBE-FW-") && !strings.HasPrefix(chainString, "KUBE-XLB-") {
+			if !strings.HasPrefix(chainString, "MULTUS-SVC-") && !strings.HasPrefix(chainString, "MULTUS-SEP-") && !strings.HasPrefix(chainString, "MULTUS-FW-") && !strings.HasPrefix(chainString, "MULTUS-XLB-") {
 				// Ignore chains that aren't ours.
 				continue
 			}
@@ -1451,7 +1463,7 @@ func (proxier *Proxier) syncProxyRules_pods(podInfo *proxy.PodInfo) {
 		netCIDRs, err := getIFNetCIDR(ifName)
 
 		if err != nil || netCIDRs == nil {
-			klog.Infof("XXX: %v", err)
+			klog.Infof("XXX: invalid CIDR %v", err)
 			continue
 		}
 

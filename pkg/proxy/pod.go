@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc"
 	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	k8sutils "k8s.io/kubernetes/pkg/kubelet/util"
+	docker "github.com/docker/docker/client"
 
 	/*
 	"fmt"
@@ -127,6 +128,10 @@ type PodChangeTracker struct {
 	crioConn *grpc.ClientConn
 }
 
+func (pct *PodChangeTracker) String() string {
+	return fmt.Sprintf("podChange: %v", pct.items)
+}
+
 func (pct *PodChangeTracker) newPodInfo(pod *v1.Pod) (*PodInfo, error) {
 	annotationString, ok := pod.ObjectMeta.Annotations["k8s.v1.cni.cncf.io/networks"]
 	networks := []*NetworkSelectionElement{}
@@ -135,6 +140,7 @@ func (pct *PodChangeTracker) newPodInfo(pod *v1.Pod) (*PodInfo, error) {
 	if !ok {
 		networks = nil
 	} else {
+		//klog.Info("XXX: Pod:", pod.ObjectMeta.Name, ": Annotations!:", annotationString)
 		if strings.IndexAny(annotationString, "[{\"") >= 0 {
 			if err := json.Unmarshal([]byte(annotationString), &networks); err != nil {
 				return nil, fmt.Errorf("Invalid json at k8s.v1.cni.cncf.io/networks")
@@ -144,9 +150,7 @@ func (pct *PodChangeTracker) newPodInfo(pod *v1.Pod) (*PodInfo, error) {
 				item = strings.TrimSpace(item)
 
 				netNsName, networkName, netIfName, err := parsePodNetworkObjectName(item)
-				if err != nil {
-					return nil, err
-
+				if err == nil {
 					networks = append(networks, &NetworkSelectionElement{
 						Name: networkName,
 						Namespace: netNsName,
@@ -155,6 +159,7 @@ func (pct *PodChangeTracker) newPodInfo(pod *v1.Pod) (*PodInfo, error) {
 				}
 			}
 		}
+		//klog.Info("XXX: networks!:", networks)
 	}
 
 	// parse networkStatus
@@ -163,24 +168,55 @@ func (pct *PodChangeTracker) newPodInfo(pod *v1.Pod) (*PodInfo, error) {
 	// get Container netns
 	procPrefix := ""
 	netNamespace := ""
-	containerID := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "cri-o://")
-	if len(containerID) > 0 {
-		request := &pb.ContainerStatusRequest{
-			ContainerId: containerID,
-			Verbose:     true,
-		}
-		r, err := pct.crioClient.ContainerStatus(context.TODO(), request)
-		if err != nil {
-		}
-
-		var prefix string
-		if procPrefix == "" {
-			prefix = ""
-		} else {
-			prefix = fmt.Sprintf("%s", procPrefix)
-		}
-		netNamespace = fmt.Sprintf("%s/proc/%s/ns/net", prefix, r.Info["pid"])
+	if len(pod.Status.ContainerStatuses) == 0 {
+		return nil, fmt.Errorf("XXX: No container status")
 	}
+
+	//klog.Infof("XXX: ContainerID %v", pod.Status.ContainerStatuses[0].ContainerID)
+	runtimeKind := strings.Split(pod.Status.ContainerStatuses[0].ContainerID, ":")
+	if runtimeKind[0] == "docker" {
+		containerID := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "docker://")
+		if len(containerID) > 0 {
+			c, err := docker.NewEnvClient()
+			if err != nil {
+				panic(err)
+			}
+
+			//klog.Info("XXX: Send Req!")
+			c.NegotiateAPIVersion(context.TODO())
+			json, err := c.ContainerInspect(context.TODO(), containerID)
+			if err != nil {
+				klog.Info("XXX: err1:", err)
+				return nil, fmt.Errorf("failed to get container info: %v", err)
+			}
+			if json.NetworkSettings == nil {
+				klog.Info("XXX: err2:", json)
+				return nil, fmt.Errorf("failed to get container info: %v", err)
+			}
+			netNamespace = fmt.Sprintf("%s/proc/%d/ns/net", procPrefix, json.State.Pid)
+			//klog.Info("XXX: namespace:", netNamespace)
+		}
+	} else { // crio
+		containerID := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "cri-o://")
+		if len(containerID) > 0 {
+			request := &pb.ContainerStatusRequest{
+				ContainerId: containerID,
+				Verbose:     true,
+			}
+			r, err := pct.crioClient.ContainerStatus(context.TODO(), request)
+			if err != nil {
+				klog.Info("XXX: ERR1")
+				return nil, fmt.Errorf("cannot get containerStatus")
+			}
+
+			if pid, ok := r.Info["pid"]; ok {
+				klog.Infof("XXX: PID: %v", pid)
+				netNamespace = fmt.Sprintf("%s/proc/%s/ns/net", procPrefix, pid)
+			}
+		}
+	}
+
+	//Docker/cri-o
 
 	info := &PodInfo{
 		name: pod.ObjectMeta.Name,
@@ -224,6 +260,10 @@ func (pct *PodChangeTracker) podToPodMap(pod *v1.Pod) PodMap {
 func (pct *PodChangeTracker) Update(previous, current *v1.Pod) bool {
 	pod := current
 
+	if pct == nil {
+		return false
+	}
+
 	if pod == nil {
 		pod = previous
 	}
@@ -232,24 +272,27 @@ func (pct *PodChangeTracker) Update(previous, current *v1.Pod) bool {
 	}
 	namespacedName := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
 
+	//klog.Infof("XXX: Update: %v -> %v", previous, current)
 	pct.lock.Lock()
 	defer pct.lock.Unlock()
 
 	change, exists := pct.items[namespacedName]
 	if !exists {
 		change = &podChange{}
+		//klog.Infof("XXX:prev:")
 		prevPodMap := pct.podToPodMap(previous)
 		// XXX: nilcheck
 		change.previous = prevPodMap
 		pct.items[namespacedName] = change
 	}
+	//klog.Infof("XXX: cur:")
 	curPodMap := pct.podToPodMap(current)
 	// XXX: nilcheck
 	change.current = curPodMap
 	if reflect.DeepEqual(change.previous, change.current) {
 		delete(pct.items, namespacedName)
 	}
-	klog.Infof("XXX1:%v", pct.items)
+	//klog.Infof("XXX: result:%v", pct.items)
 	return len(pct.items) > 0
 }
 
@@ -257,15 +300,22 @@ type PodMap map[types.NamespacedName]PodInfo
 
 // Update updates podMap base on the given changes
 func (pm *PodMap)Update(changes *PodChangeTracker) {
-	pm.apply(changes)
+	if pm != nil {
+		pm.apply(changes)
+	}
 }
 
 func (pm *PodMap) apply(changes *PodChangeTracker) {
+	if pm == nil || changes == nil {
+		return
+	}
+
 	changes.lock.Lock()
 	defer changes.lock.Unlock()
 	for _, change := range changes.items {
-		pm.merge(change.current)
+		//klog.Infof("XXX: apply:  %v -> %v", change.previous, change.current)
 		pm.unmerge(change.previous)
+		pm.merge(change.current)
 	}
 	// clear changes after applying them to ServiceMap.
 	changes.items = make(map[types.NamespacedName]*podChange)
@@ -291,7 +341,7 @@ func (pm *PodMap)String() string {
 	}
 	str := ""
 	for _, v := range *pm {
-		str = fmt.Sprintf("%s\n \tpod: %s", str, v)
+		str = fmt.Sprintf("%s\n\tpod: %s", str, v.Name())
 	}
 	return str
 }
@@ -341,6 +391,7 @@ func parsePodNetworkObjectName(podnetwork string) (string, string, string, error
 
 func getRuntimeClientConnection() (*grpc.ClientConn, error) {
     //return nil, fmt.Errorf("--runtime-endpoint is not set")
+    //Docker/cri-o
     RuntimeEndpoint := "unix:///var/run/crio/crio.sock"
     Timeout := 10 * time.Second
 

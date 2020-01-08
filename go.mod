@@ -5,6 +5,7 @@ go 1.13
 require (
 	bitbucket.org/ww/goautoneg v0.0.0-20120707110453-75cd24fc2f2c // indirect
 	github.com/containernetworking/plugins v0.8.3
+	github.com/docker/docker v0.7.3-0.20190327010347-be7ac8be2ae0
 	github.com/elazarl/go-bindata-assetfs v1.0.0 // indirect
 	github.com/emicklei/go-restful v2.11.1+incompatible // indirect
 	github.com/emicklei/go-restful-swagger12 v0.0.0-20170926063155-7524189396c6 // indirect
