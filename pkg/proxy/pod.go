@@ -69,8 +69,11 @@ type PodInfo struct {
 func (info *PodInfo) GetMultusNetIFs() []string {
 	results := []string{}
 
-	for _, status := range info.networkStatus[1:] {
-		results = append(results, status.Interface)
+	if info != nil && len(info.networkStatus) > 0 {
+		klog.Info("XXXST:", info.networkStatus)
+		for _, status := range info.networkStatus[1:] {
+			results = append(results, status.Interface)
+		}
 	}
 	return results
 }
