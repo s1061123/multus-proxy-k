@@ -668,6 +668,18 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	go proxier.syncProxyRules()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodSynced() {
+}
+
 func sameConfig(info *ServiceInfo, service *v1.Service, port *v1.ServicePort) bool {
 	if info.protocol != port.Protocol || info.portal.port != int(port.Port) || info.nodePort != int(port.NodePort) {
 		return false

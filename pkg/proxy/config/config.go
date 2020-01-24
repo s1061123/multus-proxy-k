@@ -80,6 +80,23 @@ type EndpointSliceHandler interface {
 	OnEndpointSlicesSynced()
 }
 
+// PodHandler is an abstract interface of objects which receive
+// notifications about pod object changes.
+type PodHandler interface {
+	// OnPodAdd is called whenever creation of new pod object
+	// is observed.
+	OnPodAdd(pod *v1.Pod)
+	// OnPodUpdate is called whenever modification of an existing
+	// pod object is observed.
+	OnPodUpdate(oldPod, pod *v1.Pod)
+	// OnPodDelete is called whenever deletion of an existing pod
+	// object is observed.
+	OnPodDelete(pod *v1.Pod)
+	// OnPodSynced is called once all the initial event handlers were
+	// called and the state is fully propagated to local cache.
+	OnPodSynced()
+}
+
 // NoopEndpointSliceHandler is a noop handler for proxiers that have not yet
 // implemented a full EndpointSliceHandler.
 type NoopEndpointSliceHandler struct{}
@@ -367,5 +384,94 @@ func (c *ServiceConfig) handleDeleteService(obj interface{}) {
 	for i := range c.eventHandlers {
 		klog.V(4).Info("Calling handler.OnServiceDelete")
 		c.eventHandlers[i].OnServiceDelete(service)
+	}
+}
+
+type PodConfig struct {
+	listerSynched cache.InformerSynced
+	eventHandlers []PodHandler
+}
+
+// NewPodConfig creates a new PodConfig.
+func NewPodConfig(podInformer coreinformers.PodInformer, resyncPeriod time.Duration) *PodConfig {
+	result := &PodConfig{
+		listerSynched: podInformer.Informer().HasSynced,
+	}
+
+	podInformer.Informer().AddEventHandlerWithResyncPeriod(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: result.handleAddPod,
+			UpdateFunc: result.handleUpdatePod,
+			DeleteFunc: result.handleDeletePod,
+		},
+		resyncPeriod,
+	)
+	return result
+}
+
+// RegisterEventHandler registers a handler which is called on every pod change.
+func (c *PodConfig) RegisterEventHandler(handler PodHandler) {
+	c.eventHandlers = append(c.eventHandlers, handler)
+}
+
+// Run waits for cache synced and invokes handlers after syncing.
+func (c *PodConfig) Run(stopCh <-chan struct{}) {
+	klog.Info("Starting pod config controller")
+
+	if !cache.WaitForNamedCacheSync("pod config", stopCh, c.listerSynched) {
+		return
+	}
+
+	for i := range c.eventHandlers {
+		klog.V(3).Infof("Calling handler.OnPodSynced()")
+		c.eventHandlers[i].OnPodSynced()
+	}
+}
+
+func (c *PodConfig) handleAddPod(obj interface{}) {
+	pod, ok := obj.(*v1.Pod)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", obj))
+		return
+	}
+
+	for i:= range c.eventHandlers {
+		klog.V(4).Infof("Calling handler.OnPodAdd")
+		c.eventHandlers[i].OnPodAdd(pod)
+	}
+}
+
+func (c *PodConfig) handleUpdatePod(oldObj, newObj interface{}) {
+	oldPod, ok := oldObj.(*v1.Pod)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", oldObj))
+		return
+	}
+	pod, ok := newObj.(*v1.Pod)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", newObj))
+		return
+	}
+	for i := range c.eventHandlers {
+		klog.V(4).Infof("Calling handler.OnPodUpdate")
+		c.eventHandlers[i].OnPodUpdate(oldPod, pod)
+	}
+}
+
+func (c *PodConfig) handleDeletePod(obj interface{}) {
+	pod, ok := obj.(*v1.Pod)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", obj))
+		}
+		if pod, ok = tombstone.Obj.(*v1.Pod); !ok {
+			utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", obj))
+			return
+		}
+	}
+	for i := range c.eventHandlers {
+		klog.V(4).Infof("Calling handler.OnPodDelete")
+		c.eventHandlers[i].OnPodDelete(pod)
 	}
 }

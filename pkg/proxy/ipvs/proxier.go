@@ -890,6 +890,18 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.syncProxyRules()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodSynced() {
+}
+
 // EntryInvalidErr indicates if an ipset entry is invalid or not
 const EntryInvalidErr = "error adding entry %s to ipset %s"
 

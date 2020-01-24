@@ -34,6 +34,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
@@ -67,8 +68,6 @@ import (
 	"github.com/s1061123/multus-proxy-k/pkg/proxy/config"
 	"github.com/s1061123/multus-proxy-k/pkg/proxy/healthcheck"
 	"github.com/s1061123/multus-proxy-k/pkg/proxy/iptables"
-	"github.com/s1061123/multus-proxy-k/pkg/proxy/ipvs"
-	"github.com/s1061123/multus-proxy-k/pkg/proxy/userspace"
 	proxyutil "github.com/s1061123/multus-proxy-k/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/util/configz"
 	"k8s.io/kubernetes/pkg/util/filesystem"
@@ -76,6 +75,7 @@ import (
 	utilipset "k8s.io/kubernetes/pkg/util/ipset"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 	utilipvs "k8s.io/kubernetes/pkg/util/ipvs"
+	utilnode "k8s.io/kubernetes/pkg/util/node"
 	"k8s.io/kubernetes/pkg/util/oom"
 	"k8s.io/kubernetes/pkg/version"
 	"k8s.io/kubernetes/pkg/version/verflag"
@@ -92,7 +92,7 @@ const (
 
 // proxyRun defines the interface to run a specified ProxyServer
 type proxyRun interface {
-	Run() error
+	Run(string) error
 	CleanupAndExit() error
 }
 
@@ -313,9 +313,16 @@ func (o *Options) runLoop() error {
 		o.watcher.Run()
 	}
 
+	//
+	hostname, err := utilnode.GetHostname(o.config.HostnameOverride)
+	if err != nil {
+		return err
+	}
+
+
 	// run the proxy in goroutine
 	go func() {
-		err := o.proxyServer.Run()
+		err := o.proxyServer.Run(hostname)
 		o.errCh <- err
 	}()
 
@@ -524,7 +531,7 @@ func createClients(config componentbaseconfig.ClientConnectionConfiguration, mas
 
 // Run runs the specified ProxyServer.  This should never exit (unless CleanupAndExit is set).
 // TODO: At the moment, Run() cannot return a nil error, otherwise it's caller will never exit. Update callers of Run to handle nil errors.
-func (s *ProxyServer) Run() error {
+func (s *ProxyServer) Run(hostname string) error {
 	// To help debugging, immediately log version
 	klog.Infof("Version: %+v", version.Get())
 
@@ -607,7 +614,7 @@ func (s *ProxyServer) Run() error {
 		}
 	}
 
-	noProxyName, err := labels.NewRequirement(apis.LabelServiceProxyName, selection.DoesNotExist, nil)
+	multusProxyName, err := labels.NewRequirement(apis.LabelServiceProxyName, selection.Equals, []string{"multus-proxy"})
 	if err != nil {
 		return err
 	}
@@ -618,7 +625,7 @@ func (s *ProxyServer) Run() error {
 	}
 
 	labelSelector := labels.NewSelector()
-	labelSelector = labelSelector.Add(*noProxyName, *noHeadlessEndpoints)
+	labelSelector = labelSelector.Add(*multusProxyName, *noHeadlessEndpoints)
 
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(s.Client, s.ConfigSyncPeriod,
 		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
@@ -646,6 +653,22 @@ func (s *ProxyServer) Run() error {
 	// This has to start after the calls to NewServiceConfig and NewEndpointsConfig because those
 	// functions must configure their shared informer event handlers first.
 	informerFactory.Start(wait.NeverStop)
+
+	//XXX
+	fieldSelector := fields.SelectorFromSet(fields.Set{
+		"spec.nodeName": hostname,
+	})
+
+	klog.Infof("XXX: host=%s", hostname)
+	// Pod Informer / Pod Controller
+	podInformerFactory := informers.NewSharedInformerFactoryWithOptions(s.Client, s.ConfigSyncPeriod,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.FieldSelector = fieldSelector.String()
+		}))
+	podConfig := config.NewPodConfig(podInformerFactory.Core().V1().Pods(), s.ConfigSyncPeriod)
+	podConfig.RegisterEventHandler(s.Proxier)
+	go podConfig.Run(wait.NeverStop)
+	podInformerFactory.Start(wait.NeverStop)
 
 	// Birth Cry after the birth is successful
 	s.birthCry()
@@ -678,9 +701,7 @@ func getConntrackMax(config kubeproxyconfig.KubeProxyConntrackConfiguration) (in
 
 // CleanupAndExit remove iptables rules and exit if success return nil
 func (s *ProxyServer) CleanupAndExit() error {
-	encounteredError := userspace.CleanupLeftovers(s.IptInterface)
-	encounteredError = iptables.CleanupLeftovers(s.IptInterface) || encounteredError
-	encounteredError = ipvs.CleanupLeftovers(s.IpvsInterface, s.IptInterface, s.IpsetInterface, s.CleanupIPVS) || encounteredError
+	encounteredError := iptables.CleanupLeftovers(s.IptInterface)
 	if encounteredError {
 		return errors.New("encountered an error while tearing down rules")
 	}

@@ -26,7 +26,7 @@ import (
 	"encoding/base32"
 	"fmt"
 	"net"
-	"os"
+	//"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,29 +51,32 @@ import (
 	utilsysctl "k8s.io/kubernetes/pkg/util/sysctl"
 	utilexec "k8s.io/utils/exec"
 	utilnet "k8s.io/utils/net"
+
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/vishvananda/netlink"
 )
 
 const (
 	// the services chain
-	kubeServicesChain utiliptables.Chain = "KUBE-SERVICES"
+	kubeServicesChain utiliptables.Chain = "MULTUS-SERVICES"
 
 	// the external services chain
-	kubeExternalServicesChain utiliptables.Chain = "KUBE-EXTERNAL-SERVICES"
+	kubeExternalServicesChain utiliptables.Chain = "MULTUS-EXTERNAL-SERVICES"
 
 	// the nodeports chain
-	kubeNodePortsChain utiliptables.Chain = "KUBE-NODEPORTS"
+	kubeNodePortsChain utiliptables.Chain = "MULTUS-NODEPORTS"
 
 	// the kubernetes postrouting chain
-	kubePostroutingChain utiliptables.Chain = "KUBE-POSTROUTING"
+	kubePostroutingChain utiliptables.Chain = "MULTUS-POSTROUTING"
 
 	// KubeMarkMasqChain is the mark-for-masquerade chain
-	KubeMarkMasqChain utiliptables.Chain = "KUBE-MARK-MASQ"
+	KubeMarkMasqChain utiliptables.Chain = "MULTUS-MARK-MASQ"
 
 	// KubeMarkDropChain is the mark-for-drop chain
-	KubeMarkDropChain utiliptables.Chain = "KUBE-MARK-DROP"
+	KubeMarkDropChain utiliptables.Chain = "MULTUS-MARK-DROP"
 
 	// the kubernetes forward chain
-	kubeForwardChain utiliptables.Chain = "KUBE-FORWARD"
+	kubeForwardChain utiliptables.Chain = "MULTUS-FORWARD"
 )
 
 // KernelCompatTester tests whether the required kernel capabilities are
@@ -177,10 +180,12 @@ type Proxier struct {
 	// current is state after applying all of those.
 	endpointsChanges *proxy.EndpointChangeTracker
 	serviceChanges   *proxy.ServiceChangeTracker
+	podChanges       *proxy.PodChangeTracker
 
 	mu           sync.Mutex // protects the following fields
 	serviceMap   proxy.ServiceMap
 	endpointsMap proxy.EndpointsMap
+	podMap       proxy.PodMap
 	portsMap     map[utilproxy.LocalPort]utilproxy.Closeable
 	// endpointsSynced, endpointSlicesSynced, and servicesSynced are set to true
 	// when corresponding objects are synced after startup. This is used to avoid
@@ -188,6 +193,7 @@ type Proxier struct {
 	endpointsSynced      bool
 	endpointSlicesSynced bool
 	servicesSynced       bool
+	podSynced            bool
 	initialized          int32
 	syncRunner           *async.BoundedFrequencyRunner // governs calls to syncProxyRules
 
@@ -296,6 +302,8 @@ func NewProxier(ipt utiliptables.Interface,
 		serviceChanges:           proxy.NewServiceChangeTracker(newServiceInfo, &isIPv6, recorder),
 		endpointsMap:             make(proxy.EndpointsMap),
 		endpointsChanges:         proxy.NewEndpointChangeTracker(hostname, newEndpointInfo, &isIPv6, recorder, endpointSlicesEnabled),
+		podMap:                   make(proxy.PodMap),
+		podChanges:               proxy.NewPodChangeTracker(recorder),
 		iptables:                 ipt,
 		masqueradeAll:            masqueradeAll,
 		masqueradeMark:           masqueradeMark,
@@ -382,7 +390,7 @@ func CleanupLeftovers(ipt utiliptables.Interface) (encounteredError bool) {
 		// Hunt for service and endpoint chains.
 		for chain := range existingNATChains {
 			chainString := string(chain)
-			if strings.HasPrefix(chainString, "KUBE-SVC-") || strings.HasPrefix(chainString, "KUBE-SEP-") || strings.HasPrefix(chainString, "KUBE-FW-") || strings.HasPrefix(chainString, "KUBE-XLB-") {
+			if strings.HasPrefix(chainString, "MULTUS-SVC-") || strings.HasPrefix(chainString, "MULTUS-SEP-") || strings.HasPrefix(chainString, "MULTUS-FW-") || strings.HasPrefix(chainString, "MULTUS-XLB-") {
 				writeBytesLine(natChains, existingNATChains[chain]) // flush
 				writeLine(natRules, "-X", chainString)              // delete
 			}
@@ -509,6 +517,7 @@ func (proxier *Proxier) OnServiceSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnServSync()")
 	proxier.syncProxyRules()
 }
 
@@ -541,6 +550,7 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnEndpointsSync()")
 	proxier.syncProxyRules()
 }
 
@@ -577,6 +587,35 @@ func (proxier *Proxier) OnEndpointSlicesSynced() {
 	proxier.mu.Unlock()
 
 	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnEndpointsSliceSync()")
+	proxier.syncProxyRules()
+}
+
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+	//klog.Infof("XXX: OnPodAdd(%s)", pod.Name)
+	proxier.OnPodUpdate(nil, pod)
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+	// XXX: is the sequence correct?
+	if proxier.podChanges.Update(oldPod, pod) && proxier.isInitialized() {
+		proxier.Sync()
+	}
+	klog.Info("XXX: OnPodUpdate()")
+	proxier.syncProxyRules()
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+	proxier.OnPodUpdate(pod, nil)
+}
+
+func (proxier *Proxier) OnPodSynced() {
+	proxier.mu.Lock()
+	proxier.podSynced = true
+	proxier.mu.Unlock()
+
+	// Sync unconditionally - this is called once per lifetime.
+	klog.Info("XXX: OnPodSync()")
 	proxier.syncProxyRules()
 }
 
@@ -594,14 +633,14 @@ func portProtoHash(servicePortName string, protocol string) string {
 // returns the associated iptables chain.  This is computed by hashing (sha256)
 // then encoding to base32 and truncating with the prefix "KUBE-SVC-".
 func servicePortChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-SVC-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-SVC-" + portProtoHash(servicePortName, protocol))
 }
 
 // serviceFirewallChainName takes the ServicePortName for a service and
 // returns the associated iptables chain.  This is computed by hashing (sha256)
 // then encoding to base32 and truncating with the prefix "KUBE-FW-".
 func serviceFirewallChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-FW-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-FW-" + portProtoHash(servicePortName, protocol))
 }
 
 // serviceLBPortChainName takes the ServicePortName for a service and
@@ -610,14 +649,14 @@ func serviceFirewallChainName(servicePortName string, protocol string) utiliptab
 // this because IPTables Chain Names must be <= 28 chars long, and the longer
 // they are the harder they are to read.
 func serviceLBChainName(servicePortName string, protocol string) utiliptables.Chain {
-	return utiliptables.Chain("KUBE-XLB-" + portProtoHash(servicePortName, protocol))
+	return utiliptables.Chain("MULTUS-XLB-" + portProtoHash(servicePortName, protocol))
 }
 
 // This is the same as servicePortChainName but with the endpoint included.
 func servicePortEndpointChainName(servicePortName string, protocol string, endpoint string) utiliptables.Chain {
 	hash := sha256.Sum256([]byte(servicePortName + protocol + endpoint))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
-	return utiliptables.Chain("KUBE-SEP-" + encoded[:16])
+	return utiliptables.Chain("MULTUS-SEP-" + encoded[:16])
 }
 
 // After a UDP endpoint has been removed, we must flush any pending conntrack entries to it, or else we
@@ -671,6 +710,37 @@ func (proxier *Proxier) appendServiceCommentLocked(args []string, svcName string
 // The only other iptables rules are those that are setup in iptablesInit()
 // This assumes proxier.mu is NOT held
 func (proxier *Proxier) syncProxyRules() {
+
+	//klog.Infof("XXX: syncProxyRules():changes %v", proxier.podChanges.String())
+	//klog.Infof("XXX: syncProxyRules():map before %v", proxier.podMap.String())
+	proxier.podMap.Update(proxier.podChanges)
+	//klog.Infof("XXX: syncProxyRules():map after %v", proxier.podMap.String())
+	//klog.Infof("XXXPodMap:%s", proxier.podMap.String())
+	//klog.Infof("XXX----")
+	for _, v := range proxier.podMap {
+		//klog.Infof("XXX: %s: %v\n", v, v.NetworkAttachments())
+		if len(v.NetworkAttachments()) > 0 {
+			//klog.Infof("XXX: targetPod: %v", v.Name())
+
+			//XXX: for each pods in node....
+			netns, err := ns.GetNS(v.NetworkNamespace())
+			if err != nil {
+				//klog.Info("XXX: cannot get netNS")
+				continue
+			}
+
+			//klog.Infof("XXX: targetPod-iptables set: %v", v.Name())
+			_ = netns.Do(func(_ ns.NetNS) error {
+				proxier.syncProxyRules_pods(&v)
+				return nil
+			})
+		}
+	}
+	//klog.Infof("----XXX")
+
+}
+
+func (proxier *Proxier) syncProxyRules_pods(podInfo *proxy.PodInfo) {
 	proxier.mu.Lock()
 	defer proxier.mu.Unlock()
 
@@ -872,7 +942,7 @@ func (proxier *Proxier) syncProxyRules() {
 				"-m", protocol, "-p", protocol,
 				"-d", utilproxy.ToCIDR(svcInfo.ClusterIP()),
 				"--dport", strconv.Itoa(svcInfo.Port()),
-			)
+				)
 			if proxier.masqueradeAll {
 				writeLine(proxier.natRules, append(args, "-j", string(KubeMarkMasqChain))...)
 			} else if len(proxier.clusterCIDR) > 0 {
@@ -881,7 +951,17 @@ func (proxier *Proxier) syncProxyRules() {
 				// routing to any node, and that node will bridge into the Service
 				// for you.  Since that might bounce off-node, we masquerade here.
 				// If/when we support "Local" policy for VIPs, we should update this.
-				writeLine(proxier.natRules, append(args, "! -s", proxier.clusterCIDR, "-j", string(KubeMarkMasqChain))...)
+				for _, ifName := range podInfo.GetMultusNetIFs() {
+					netCIDRs, err := getIFNetCIDR(ifName)
+					if err != nil || netCIDRs == nil {
+						klog.Infof("XXX: invalid CIDR %v", err)
+						continue
+					}
+
+					for _, cidr := range netCIDRs {
+						writeLine(proxier.natRules, append(args, "! -s", cidr.String(), "-j", string(KubeMarkMasqChain))...)
+					}
+				}
 			}
 			writeLine(proxier.natRules, append(args, "-j", string(svcChain))...)
 		} else {
@@ -1311,7 +1391,7 @@ func (proxier *Proxier) syncProxyRules() {
 	for chain := range existingNATChains {
 		if !activeNATChains[chain] {
 			chainString := string(chain)
-			if !strings.HasPrefix(chainString, "KUBE-SVC-") && !strings.HasPrefix(chainString, "KUBE-SEP-") && !strings.HasPrefix(chainString, "KUBE-FW-") && !strings.HasPrefix(chainString, "KUBE-XLB-") {
+			if !strings.HasPrefix(chainString, "MULTUS-SVC-") && !strings.HasPrefix(chainString, "MULTUS-SEP-") && !strings.HasPrefix(chainString, "MULTUS-FW-") && !strings.HasPrefix(chainString, "MULTUS-XLB-") {
 				// Ignore chains that aren't ours.
 				continue
 			}
@@ -1378,28 +1458,39 @@ func (proxier *Proxier) syncProxyRules() {
 	)
 
 	// The following rules can only be set if clusterCIDR has been defined.
-	if len(proxier.clusterCIDR) != 0 {
-		// The following two rules ensure the traffic after the initial packet
-		// accepted by the "kubernetes forwarding rules" rule above will be
-		// accepted, to be as specific as possible the traffic must be sourced
-		// or destined to the clusterCIDR (to/from a pod).
-		writeLine(proxier.filterRules,
-			"-A", string(kubeForwardChain),
-			"-s", proxier.clusterCIDR,
-			"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod source rule"`,
-			"-m", "conntrack",
-			"--ctstate", "RELATED,ESTABLISHED",
-			"-j", "ACCEPT",
-		)
-		writeLine(proxier.filterRules,
-			"-A", string(kubeForwardChain),
-			"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod destination rule"`,
-			"-d", proxier.clusterCIDR,
-			"-m", "conntrack",
-			"--ctstate", "RELATED,ESTABLISHED",
-			"-j", "ACCEPT",
-		)
+
+	for _, ifName := range podInfo.GetMultusNetIFs() {
+		netCIDRs, err := getIFNetCIDR(ifName)
+
+		if err != nil || netCIDRs == nil {
+			klog.Infof("XXX: invalid CIDR %v", err)
+			continue
+		}
+
+		for _, cidr := range netCIDRs {
+			// The following two rules ensure the traffic after the initial packet
+			// accepted by the "kubernetes forwarding rules" rule above will be
+			// accepted, to be as specific as possible the traffic must be sourced
+			// or destined to the clusterCIDR (to/from a pod).
+			writeLine(proxier.filterRules,
+				"-A", string(kubeForwardChain),
+				"-s", cidr.String(),
+				"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod source rule"`,
+				"-m", "conntrack",
+				"--ctstate", "RELATED,ESTABLISHED",
+				"-j", "ACCEPT",
+			)
+			writeLine(proxier.filterRules,
+				"-A", string(kubeForwardChain),
+				"-m", "comment", "--comment", `"kubernetes forwarding conntrack pod destination rule"`,
+				"-d", cidr.String(),
+				"-m", "conntrack",
+				"--ctstate", "RELATED,ESTABLISHED",
+				"-j", "ACCEPT",
+			)
+		}
 	}
+
 
 	// Write the end-of-table markers.
 	writeLine(proxier.filterRules, "COMMIT")
@@ -1413,10 +1504,12 @@ func (proxier *Proxier) syncProxyRules() {
 	proxier.iptablesData.Write(proxier.natChains.Bytes())
 	proxier.iptablesData.Write(proxier.natRules.Bytes())
 
+	/*
 	fmt.Printf("XXX: ")
 	proxier.iptablesData.WriteTo(os.Stdout)
 	fmt.Printf("\n")
-	/* //XXX
+	*/
+
 	klog.V(5).Infof("Restoring iptables rules: %s", proxier.iptablesData.Bytes())
 	err = proxier.iptables.RestoreAll(proxier.iptablesData.Bytes(), utiliptables.NoFlushTables, utiliptables.RestoreCounters)
 	if err != nil {
@@ -1427,7 +1520,7 @@ func (proxier *Proxier) syncProxyRules() {
 		utilproxy.RevertPorts(replacementPortsMap, proxier.portsMap)
 		return
 	}
-	*/
+
 	for name, lastChangeTriggerTimes := range endpointUpdateResult.LastChangeTriggerTimes {
 		for _, lastChangeTriggerTime := range lastChangeTriggerTimes {
 			latency := metrics.SinceInSeconds(lastChangeTriggerTime)
@@ -1524,4 +1617,22 @@ func openLocalPort(lp *utilproxy.LocalPort) (utilproxy.Closeable, error) {
 	}
 	klog.V(2).Infof("Opened local port %s", lp.String())
 	return socket, nil
+}
+
+func getIFNetCIDR(ifNames string) ([]*net.IPNet, error) {
+	ifLink, err := netlink.LinkByName(ifNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed at LinkByName")
+	}
+	//XXX: need to support v6 as well!
+	addrs, err := netlink.AddrList(ifLink, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("failed at AddrList")
+	}
+
+	cidrs := []*net.IPNet{}
+	for _, v := range addrs {
+		cidrs = append(cidrs, v.IPNet)
+	}
+	return cidrs, nil
 }

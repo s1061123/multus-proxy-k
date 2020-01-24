@@ -855,6 +855,18 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.syncProxyRules()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod, pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodSynced() {
+}
+
 func (proxier *Proxier) cleanupAllPolicies() {
 	for svcName, svcInfo := range proxier.serviceMap {
 		svcInfo.cleanupAllPolicies(proxier.endpointsMap[svcName])

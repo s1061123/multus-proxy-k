@@ -464,6 +464,18 @@ func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.loadBalancer.OnEndpointsSynced()
 }
 
+func (proxier *Proxier) OnPodAdd(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodUpdate(oldPod pod, *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodDelete(pod *v1.Pod) {
+}
+
+func (proxier *Proxier) OnPodSynced() {
+}
+
 func sameConfig(info *serviceInfo, service *v1.Service, protocol v1.Protocol, listenPort int) bool {
 	return info.protocol == protocol && info.portal.port == listenPort && info.sessionAffinityType == service.Spec.SessionAffinity
 }
