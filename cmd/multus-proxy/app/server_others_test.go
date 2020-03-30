@@ -21,8 +21,6 @@ package app
 import (
 	"fmt"
 	"testing"
-
-	"github.com/s1061123/multus-proxy-k/pkg/proxy/ipvs"
 )
 
 type fakeIPSetVersioner struct {
@@ -69,10 +67,6 @@ func Test_getProxyMode(t *testing.T) {
 		ipsetError    error
 		expected      string
 	}{
-		{ // flag says userspace
-			flag:     "userspace",
-			expected: proxyModeUserspace,
-		},
 		{ // flag says iptables, kernel not compatible
 			flag:         "iptables",
 			kernelCompat: false,
@@ -93,53 +87,10 @@ func Test_getProxyMode(t *testing.T) {
 			kernelCompat: true,
 			expected:     proxyModeIPTables,
 		},
-		{ // flag says ipvs, ipset version ok, kernel modules installed for linux kernel before 4.19
-			flag:          "ipvs",
-			kmods:         []string{"ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack_ipv4"},
-			kernelVersion: "4.18",
-			ipsetVersion:  ipvs.MinIPSetCheckVersion,
-			expected:      proxyModeIPVS,
-		},
-		{ // flag says ipvs, ipset version ok, kernel modules installed for linux kernel 4.19
-			flag:          "ipvs",
-			kmods:         []string{"ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack"},
-			kernelVersion: "4.19",
-			ipsetVersion:  ipvs.MinIPSetCheckVersion,
-			expected:      proxyModeIPVS,
-		},
-		{ // flag says ipvs, ipset version too low, fallback on iptables mode
-			flag:          "ipvs",
-			kmods:         []string{"ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack"},
-			kernelVersion: "4.19",
-			ipsetVersion:  "0.0",
-			kernelCompat:  true,
-			expected:      proxyModeIPTables,
-		},
-		{ // flag says ipvs, bad ipset version, fallback on iptables mode
-			flag:          "ipvs",
-			kmods:         []string{"ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack"},
-			kernelVersion: "4.19",
-			ipsetVersion:  "a.b.c",
-			kernelCompat:  true,
-			expected:      proxyModeIPTables,
-		},
-		{ // flag says ipvs, required kernel modules are not installed, fallback on iptables mode
-			flag:          "ipvs",
-			kmods:         []string{"foo", "bar", "baz"},
-			kernelVersion: "4.19",
-			ipsetVersion:  ipvs.MinIPSetCheckVersion,
-			kernelCompat:  true,
-			expected:      proxyModeIPTables,
-		},
 	}
 	for i, c := range cases {
 		kcompater := &fakeKernelCompatTester{c.kernelCompat}
-		ipsetver := &fakeIPSetVersioner{c.ipsetVersion, c.ipsetError}
-		khandler := &fakeKernelHandler{
-			modules:       c.kmods,
-			kernelVersion: c.kernelVersion,
-		}
-		r := getProxyMode(c.flag, khandler, ipsetver, kcompater)
+		r := getProxyMode(c.flag, kcompater)
 		if r != c.expected {
 			t.Errorf("Case[%d] Expected %q, got %q", i, c.expected, r)
 		}

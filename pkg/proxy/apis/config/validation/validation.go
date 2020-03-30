@@ -19,7 +19,6 @@ package validation
 import (
 	"fmt"
 	"net"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -39,9 +38,6 @@ func Validate(config *kubeproxyconfig.KubeProxyConfiguration) field.ErrorList {
 	newPath := field.NewPath("KubeProxyConfiguration")
 
 	allErrs = append(allErrs, validateKubeProxyIPTablesConfiguration(config.IPTables, newPath.Child("KubeProxyIPTablesConfiguration"))...)
-	if config.Mode == kubeproxyconfig.ProxyModeIPVS {
-		allErrs = append(allErrs, validateKubeProxyIPVSConfiguration(config.IPVS, newPath.Child("KubeProxyIPVSConfiguration"))...)
-	}
 	allErrs = append(allErrs, validateKubeProxyConntrackConfiguration(config.Conntrack, newPath.Child("KubeProxyConntrackConfiguration"))...)
 	allErrs = append(allErrs, validateProxyMode(config.Mode, newPath.Child("Mode"))...)
 	allErrs = append(allErrs, validateClientConnectionConfiguration(config.ClientConnection, newPath.Child("ClientConnection"))...)
@@ -157,18 +153,12 @@ func validateKubeProxyConntrackConfiguration(config kubeproxyconfig.KubeProxyCon
 }
 
 func validateProxyMode(mode kubeproxyconfig.ProxyMode, fldPath *field.Path) field.ErrorList {
-	if runtime.GOOS == "windows" {
-		return validateProxyModeWindows(mode, fldPath)
-	}
-
 	return validateProxyModeLinux(mode, fldPath)
 }
 
 func validateProxyModeLinux(mode kubeproxyconfig.ProxyMode, fldPath *field.Path) field.ErrorList {
 	validModes := sets.NewString(
-		string(kubeproxyconfig.ProxyModeUserspace),
 		string(kubeproxyconfig.ProxyModeIPTables),
-		string(kubeproxyconfig.ProxyModeIPVS),
 	)
 
 	if mode == "" || validModes.Has(string(mode)) {
@@ -176,20 +166,6 @@ func validateProxyModeLinux(mode kubeproxyconfig.ProxyMode, fldPath *field.Path)
 	}
 
 	errMsg := fmt.Sprintf("must be %s or blank (blank means the best-available proxy [currently iptables])", strings.Join(validModes.List(), ","))
-	return field.ErrorList{field.Invalid(fldPath.Child("ProxyMode"), string(mode), errMsg)}
-}
-
-func validateProxyModeWindows(mode kubeproxyconfig.ProxyMode, fldPath *field.Path) field.ErrorList {
-	validModes := sets.NewString(
-		string(kubeproxyconfig.ProxyModeUserspace),
-		string(kubeproxyconfig.ProxyModeKernelspace),
-	)
-
-	if mode == "" || validModes.Has(string(mode)) {
-		return nil
-	}
-
-	errMsg := fmt.Sprintf("must be %s or blank (blank means the most-available proxy [currently userspace])", strings.Join(validModes.List(), ","))
 	return field.ErrorList{field.Invalid(fldPath.Child("ProxyMode"), string(mode), errMsg)}
 }
 

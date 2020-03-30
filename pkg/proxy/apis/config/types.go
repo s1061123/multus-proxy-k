@@ -171,10 +171,7 @@ type KubeProxyConfiguration struct {
 type ProxyMode string
 
 const (
-	ProxyModeUserspace   ProxyMode = "userspace"
 	ProxyModeIPTables    ProxyMode = "iptables"
-	ProxyModeIPVS        ProxyMode = "ipvs"
-	ProxyModeKernelspace ProxyMode = "kernelspace"
 )
 
 // IPVSSchedulerMethod is the algorithm for allocating TCP connections and

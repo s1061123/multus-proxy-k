@@ -479,7 +479,7 @@ udpIdleTimeout: 250ms`)
 type fakeProxyServerLongRun struct{}
 
 // Run runs the specified ProxyServer.
-func (s *fakeProxyServerLongRun) Run() error {
+func (s *fakeProxyServerLongRun) Run(hostname string) error {
 	for {
 		time.Sleep(2 * time.Second)
 	}
@@ -493,7 +493,7 @@ func (s *fakeProxyServerLongRun) CleanupAndExit() error {
 type fakeProxyServerError struct{}
 
 // Run runs the specified ProxyServer.
-func (s *fakeProxyServerError) Run() error {
+func (s *fakeProxyServerError) Run(hostname string) error {
 	for {
 		time.Sleep(2 * time.Second)
 		return fmt.Errorf("mocking error from ProxyServer.Run()")

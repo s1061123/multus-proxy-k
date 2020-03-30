@@ -18,7 +18,6 @@ package validation
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -32,11 +31,6 @@ import (
 
 func TestValidateKubeProxyConfiguration(t *testing.T) {
 	var proxyMode kubeproxyconfig.ProxyMode
-	if runtime.GOOS == "windows" {
-		proxyMode = kubeproxyconfig.ProxyModeKernelspace
-	} else {
-		proxyMode = kubeproxyconfig.ProxyModeIPVS
-	}
 	successCases := []kubeproxyconfig.KubeProxyConfiguration{
 		{
 			BindAddress:        "192.168.59.103",
@@ -250,30 +244,6 @@ func TestValidateKubeProxyConfiguration(t *testing.T) {
 			},
 			msg: "must be greater than 0",
 		},
-		{
-			config: kubeproxyconfig.KubeProxyConfiguration{
-				BindAddress:        "192.168.59.103",
-				HealthzBindAddress: "0.0.0.0:10256",
-				MetricsBindAddress: "127.0.0.1:10249",
-				ClusterCIDR:        "192.168.59.0/24",
-				UDPIdleTimeout:     metav1.Duration{Duration: 1 * time.Second},
-				ConfigSyncPeriod:   metav1.Duration{Duration: 1 * time.Second},
-				IPTables: kubeproxyconfig.KubeProxyIPTablesConfiguration{
-					MasqueradeAll: true,
-					SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
-					MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
-				},
-				// not specifying valid period in IPVS mode.
-				Mode: kubeproxyconfig.ProxyModeIPVS,
-				Conntrack: kubeproxyconfig.KubeProxyConntrackConfiguration{
-					MaxPerCore:            pointer.Int32Ptr(1),
-					Min:                   pointer.Int32Ptr(1),
-					TCPEstablishedTimeout: &metav1.Duration{Duration: 5 * time.Second},
-					TCPCloseWaitTimeout:   &metav1.Duration{Duration: 5 * time.Second},
-				},
-			},
-			msg: "must be greater than 0",
-		},
 	}
 
 	for _, errorCase := range errorCases {
@@ -359,82 +329,6 @@ func TestValidateKubeProxyIPTablesConfiguration(t *testing.T) {
 	}
 }
 
-func TestValidateKubeProxyIPVSConfiguration(t *testing.T) {
-	newPath := field.NewPath("KubeProxyConfiguration")
-	testCases := []struct {
-		config    kubeproxyconfig.KubeProxyIPVSConfiguration
-		expectErr bool
-		reason    string
-	}{
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: -5 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 2 * time.Second},
-			},
-			expectErr: true,
-			reason:    "SyncPeriod must be greater than 0",
-		},
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 0 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 10 * time.Second},
-			},
-			expectErr: true,
-			reason:    "SyncPeriod must be greater than 0",
-		},
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: -1 * time.Second},
-			},
-			expectErr: true,
-			reason:    "MinSyncPeriod must be greater than or equal to 0",
-		},
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 1 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 5 * time.Second},
-			},
-			expectErr: true,
-			reason:    "SyncPeriod must be greater than or equal to MinSyncPeriod",
-		},
-		// SyncPeriod == MinSyncPeriod
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 10 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 10 * time.Second},
-			},
-			expectErr: false,
-		},
-		// SyncPeriod > MinSyncPeriod
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 10 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 5 * time.Second},
-			},
-			expectErr: false,
-		},
-		// SyncPeriod can be 0
-		{
-			config: kubeproxyconfig.KubeProxyIPVSConfiguration{
-				SyncPeriod:    metav1.Duration{Duration: 5 * time.Second},
-				MinSyncPeriod: metav1.Duration{Duration: 0 * time.Second},
-			},
-			expectErr: false,
-		},
-	}
-
-	for _, test := range testCases {
-		errs := validateKubeProxyIPVSConfiguration(test.config, newPath.Child("KubeProxyIPVSConfiguration"))
-		if len(errs) == 0 && test.expectErr {
-			t.Errorf("Expect error, got nil, reason: %s", test.reason)
-		}
-		if len(errs) > 0 && !test.expectErr {
-			t.Errorf("Unexpected error: %v", errs)
-		}
-	}
-}
-
 func TestValidateKubeProxyConntrackConfiguration(t *testing.T) {
 	successCases := []kubeproxyconfig.KubeProxyConntrackConfiguration{
 		{
@@ -511,15 +405,10 @@ func TestValidateKubeProxyConntrackConfiguration(t *testing.T) {
 func TestValidateProxyMode(t *testing.T) {
 	newPath := field.NewPath("KubeProxyConfiguration")
 	successCases := []kubeproxyconfig.ProxyMode{
-		kubeproxyconfig.ProxyModeUserspace,
 		kubeproxyconfig.ProxyMode(""),
 	}
 
-	if runtime.GOOS == "windows" {
-		successCases = append(successCases, kubeproxyconfig.ProxyModeKernelspace)
-	} else {
-		successCases = append(successCases, kubeproxyconfig.ProxyModeIPTables, kubeproxyconfig.ProxyModeIPVS)
-	}
+	successCases = append(successCases, kubeproxyconfig.ProxyModeIPTables)
 
 	for _, successCase := range successCases {
 		if errs := validateProxyMode(successCase, newPath.Child("ProxyMode")); len(errs) != 0 {
@@ -626,48 +515,6 @@ func TestValidateHostPort(t *testing.T) {
 
 	for _, errorCase := range errorCases {
 		if errs := validateHostPort(errorCase.ccc, newPath.Child("HealthzBindAddress")); len(errs) == 0 {
-			t.Errorf("expected failure for %s", errorCase.msg)
-		} else if !strings.Contains(errs[0].Error(), errorCase.msg) {
-			t.Errorf("unexpected error: %v, expected: %s", errs[0], errorCase.msg)
-		}
-	}
-}
-
-func TestValidateIPVSSchedulerMethod(t *testing.T) {
-	newPath := field.NewPath("KubeProxyConfiguration")
-
-	successCases := []kubeproxyconfig.IPVSSchedulerMethod{
-		kubeproxyconfig.RoundRobin,
-		kubeproxyconfig.WeightedRoundRobin,
-		kubeproxyconfig.LeastConnection,
-		kubeproxyconfig.WeightedLeastConnection,
-		kubeproxyconfig.LocalityBasedLeastConnection,
-		kubeproxyconfig.LocalityBasedLeastConnectionWithReplication,
-		kubeproxyconfig.SourceHashing,
-		kubeproxyconfig.DestinationHashing,
-		kubeproxyconfig.ShortestExpectedDelay,
-		kubeproxyconfig.NeverQueue,
-		"",
-	}
-
-	for _, successCase := range successCases {
-		if errs := validateIPVSSchedulerMethod(successCase, newPath.Child("Scheduler")); len(errs) != 0 {
-			t.Errorf("expected success: %v", errs)
-		}
-	}
-
-	errorCases := []struct {
-		mode kubeproxyconfig.IPVSSchedulerMethod
-		msg  string
-	}{
-		{
-			mode: kubeproxyconfig.IPVSSchedulerMethod("non-existing"),
-			msg:  "blank means the default algorithm method (currently rr)",
-		},
-	}
-
-	for _, errorCase := range errorCases {
-		if errs := validateIPVSSchedulerMethod(errorCase.mode, newPath.Child("ProxyMode")); len(errs) == 0 {
 			t.Errorf("expected failure for %s", errorCase.msg)
 		} else if !strings.Contains(errs[0].Error(), errorCase.msg) {
 			t.Errorf("unexpected error: %v, expected: %s", errs[0], errorCase.msg)
